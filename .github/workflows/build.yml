@@ -1,0 +1,116 @@
+name: ISR Build Pipeline
+
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
+
+jobs:
+  export-kicad:
+    env:
+      BaseFileName: "ISR"
+      Folder: "./pcb"
+      SchematicFileExtension: "kicad_sch"
+      PCBFileExtension: "kicad_pcb"
+      OutputFolder: "./output"
+      ConfigFilePath: ".kibot/build.kibot.yaml"
+    runs-on: ubuntu-latest
+    steps:
+    - name: Fetch repository
+      uses: actions/checkout@v4
+    
+    - name: Prepare output directory
+      run: |
+        mkdir -p ${{ env.OutputFolder }}
+        cp -r ${{ env.Folder }} ${{ env.OutputFolder }}/kicad
+        cp ./LICENSE ${{ env.OutputFolder }}
+
+    - name: Run KiBOT
+      uses: INTI-CMNB/KiBot@v2_k9
+      with:
+        config: ${{ env.ConfigFilePath }}
+        dir: ${{ env.OutputFolder }}
+        schema: "${{ env.Folder }}/${{ env.BaseFileName }}.${{ env.SchematicFileExtension }}"
+        board: "${{ env.Folder }}/${{ env.BaseFileName }}.${{ env.PCBFileExtension }}"
+
+    - name: Archive artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: kicad-export
+        path: ${{ env.OutputFolder }}
+        retention-days: 1
+    
+  export-freecad:
+    needs: [export-kicad]
+    env:
+      FREECADVERSION: "1.1.1"
+      FREECADFOLDER: "./mechanical"
+      FREECADFILENAME: "housing.FCStd"
+      OUTPUTFOLDER: "./output"
+      PARTTYPE: "PartDesign::Body"
+    runs-on: ubuntu-latest
+    steps:
+    - name: Fetch repository
+      uses: actions/checkout@v4
+    
+    - name: Download KiCad Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: kicad-export
+        path: ./artifact/kicad
+
+    - name: Checkout xdb-freecad repository
+      uses: actions/checkout@v5
+      with:
+        repository: 0x007E/xdb-freecad
+        path: mechanical
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Prepare output directory
+      run: |
+        mkdir -p ${{ env.OUTPUTFOLDER }}
+        cp ./LICENSE ${{ env.OUTPUTFOLDER }}
+        cp -r ./artifact/kicad/step/*.step ${{ env.FREECADFOLDER }}/pcb.step
+
+    - name: Install FreeCAD
+      run: |
+          wget https://github.com/FreeCAD/FreeCAD/releases/download/${{ env.FREECADVERSION }}/FreeCAD_${{ env.FREECADVERSION }}-Linux-x86_64-py311.AppImage
+          chmod 0777 FreeCAD_${{ env.FREECADVERSION }}-Linux-x86_64-py311.AppImage
+          ./FreeCAD_${{ env.FREECADVERSION }}-Linux-x86_64-py311.AppImage --appimage-extract
+    
+    - name: Get FreeCAD Export
+      run: |
+          git clone https://github.com/0x007E/pyfreecadexport.git
+    
+    - name: Modify FreeCAD File
+      run: |
+          REPO_NAME="$(basename "${{ github.repository }}")"
+          REPO_NAME_UPPER="${REPO_NAME^^}"
+
+          cp -r ${{ env.FREECADFOLDER }}/${{ env.FREECADFILENAME }} ./housing.FCStd
+          cp -r ${{ env.FREECADFOLDER }}/*.otf ./
+
+          ./squashfs-root/usr/bin/python ./pyfreecadexport/src/pyfreecadspreadsheet.py -f "${{ env.FREECADFILENAME }}" -s "Parameter" -a "Text_Function" -d "${REPO_NAME_UPPER}" -l "squashfs-root/usr/lib/"
+
+          ./squashfs-root/usr/bin/python ./pyfreecadexport/src/pyfreecadremove.py -f "${{ env.FREECADFILENAME }}" -p "App::Part" -n "PCB" -l "squashfs-root/usr/lib/"
+
+          ./squashfs-root/usr/bin/python ./pyfreecadexport/src/pyfreecadimport.py -f "${{ env.FREECADFILENAME }}" -p "${{ env.FREECADFOLDER }}/pcb.step" -z "-1.6" -l "squashfs-root/usr/lib/"
+
+          rm -r ./*.otf
+          cp -r ./${{ env.FREECADFILENAME }} ${{ env.FREECADFOLDER }}/${{ env.FREECADFILENAME }}
+          cp -r ${{ env.FREECADFOLDER }} ${{ env.OUTPUTFOLDER }}
+
+    - name: Export STEP Files
+      run: |
+          ./squashfs-root/usr/bin/python ./pyfreecadexport/src/pyfreecadexport.py -f "${{ env.FREECADFOLDER }}/${{ env.FREECADFILENAME }}" -p "${{ env.PARTTYPE }}" -d "${{ env.OUTPUTFOLDER }}" -e "step" -l "squashfs-root/usr/lib/"
+          ./squashfs-root/usr/bin/python ./pyfreecadexport/src/pyfreecadexport.py -f "${{ env.FREECADFOLDER }}/${{ env.FREECADFILENAME }}" -p "${{ env.PARTTYPE }}" -d "${{ env.OUTPUTFOLDER }}" -e "stl" -l "squashfs-root/usr/lib/"
+    
+    - name: Archive artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: freecad-export
+        path: ${{ env.OUTPUTFOLDER }}
+        retention-days: 1
